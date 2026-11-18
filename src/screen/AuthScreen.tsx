@@ -1,4 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
+import * as Linking from "expo-linking";
+import * as WebBrowser from "expo-web-browser";
 import { useState } from "react";
 import {
   ActivityIndicator,
@@ -14,7 +16,12 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import GoogleLogo from "../components/Google";
+import { APP_NAME, APP_TAGLINE } from "../lib/Brand";
 import { supabase } from "../lib/supabase";
+
+// Lets the browser window close itself after Google / Facebook sign-in
+WebBrowser.maybeCompleteAuthSession();
 
 type Mode = "login" | "signup" | "forgot";
 
@@ -75,6 +82,9 @@ export default function AuthScreen() {
   const [confirm, setConfirm] = useState<string>("");
   const [showPw, setShowPw] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
+  const [socialBusy, setSocialBusy] = useState<"google" | "facebook" | null>(
+    null,
+  );
   const [error, setError] = useState<string>("");
 
   const go = (m: Mode): void => {
@@ -185,6 +195,66 @@ export default function AuthScreen() {
     }
   };
 
+  // Google / Facebook sign-in through Supabase
+  const handleSocial = async (
+    provider: "google" | "facebook",
+  ): Promise<void> => {
+    setSocialBusy(provider);
+    setError("");
+    try {
+      const redirectTo = Linking.createURL("/");
+      // Add this exact URL to Supabase > Authentication > URL Configuration > Redirect URLs
+      console.log("Supabase redirect URL:", redirectTo);
+
+      const { data, error: e } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo, skipBrowserRedirect: true },
+      });
+      if (e || !data?.url) throw e ?? new Error("Could not start sign-in.");
+
+      const result = await WebBrowser.openAuthSessionAsync(
+        data.url,
+        redirectTo,
+      );
+      if (result.type !== "success") return; // the student closed the window
+
+      const url = result.url;
+      const query = url.includes("#")
+        ? url.split("#")[1]
+        : (url.split("?")[1] ?? "");
+      const params = new URLSearchParams(query);
+
+      const failure = params.get("error_description");
+      if (failure) throw new Error(failure);
+
+      const code = params.get("code");
+      const accessToken = params.get("access_token");
+      const refreshToken = params.get("refresh_token");
+
+      if (code) {
+        const { error: ex } = await supabase.auth.exchangeCodeForSession(code);
+        if (ex) throw ex;
+      } else if (accessToken && refreshToken) {
+        const { error: es } = await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        });
+        if (es) throw es;
+      } else {
+        throw new Error("Sign-in did not finish. Please try again.");
+      }
+      // On success, index.tsx notices the new session and opens the dashboard
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Could not sign in. Please try again.",
+      );
+    } finally {
+      setSocialBusy(null);
+    }
+  };
+
   const submit: () => Promise<void> =
     mode === "login"
       ? handleLogin
@@ -219,8 +289,8 @@ export default function AuthScreen() {
             <View style={styles.crossV} />
             <View style={styles.crossH} />
           </View>
-          <Text style={styles.title}>BIPSUCAREHUB</Text>
-          <Text style={styles.subtitle}>Your campus clinic, one tap away</Text>
+          <Text style={styles.title}>{APP_NAME}</Text>
+          <Text style={styles.subtitle}>{APP_TAGLINE}</Text>
 
           {/* Card */}
           <View style={styles.card}>
@@ -311,6 +381,48 @@ export default function AuthScreen() {
                 <Text style={styles.linkText}>Back to login</Text>
               </TouchableOpacity>
             )}
+
+            {mode !== "forgot" && (
+              <>
+                <View style={styles.orRow}>
+                  <View style={styles.orLine} />
+                  <Text style={styles.orText}>or continue with</Text>
+                  <View style={styles.orLine} />
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.socialBtn, styles.googleBtn]}
+                  onPress={() => handleSocial("google")}
+                  disabled={!!socialBusy || busy}
+                >
+                  {socialBusy === "google" ? (
+                    <ActivityIndicator color="#333" />
+                  ) : (
+                    <>
+                      <GoogleLogo size={20} />
+                      <Text style={styles.googleText}>
+                        Continue with Google
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.socialBtn, styles.fbBtn]}
+                  onPress={() => handleSocial("facebook")}
+                  disabled={!!socialBusy || busy}
+                >
+                  {socialBusy === "facebook" ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="logo-facebook" size={20} color="#fff" />
+                      <Text style={styles.fbText}>Continue with Facebook</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -330,7 +442,7 @@ const styles = StyleSheet.create({
     width: 72,
     height: 72,
     borderRadius: 36,
-    backgroundColor: "#3f1aba",
+    backgroundColor: "#fff",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 14,
@@ -409,4 +521,33 @@ const styles = StyleSheet.create({
   btnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
   link: { alignItems: "center", marginTop: 16 },
   linkText: { fontSize: 15, fontWeight: "700", color: C.tealDark },
+  orRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 20,
+    marginBottom: 14,
+  },
+  orLine: { flex: 1, height: 1, backgroundColor: C.line },
+  orText: { marginHorizontal: 10, fontSize: 12, color: C.muted },
+  socialBtn: {
+    height: 48,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+  },
+  googleBtn: {
+    backgroundColor: "#fff",
+    borderWidth: 1.5,
+    borderColor: "#DADCE0",
+  },
+  googleText: {
+    marginLeft: 10,
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#333",
+  },
+  fbBtn: { backgroundColor: "#1877F2" },
+  fbText: { marginLeft: 10, fontSize: 15, fontWeight: "700", color: "#fff" },
 });
